@@ -1,13 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import folium
-from streamlit_folium import st_folium
 import requests
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 import base64
 from typing import Optional
 import time
@@ -74,138 +69,155 @@ def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
     if 'nascimentos' in df.columns and 'registros' in df.columns:
         df['percentual'] = ((df['registros'] / df['nascimentos']) * 100).round(2)
         df['percentual'] = df['percentual'].fillna(0)
+        # Limitar percentual a 100% máximo
+        df['percentual'] = df['percentual'].clip(upper=100)
     
     # Limpeza de dados
     df = df.dropna(subset=['municipio']) if 'municipio' in df.columns else df
     
     return df
 
-def criar_graficos(df: pd.DataFrame):
-    """Cria gráficos interativos"""
+def criar_graficos_streamlit(df: pd.DataFrame):
+    """Cria gráficos usando funcionalidades nativas do Streamlit"""
     
-    # Gráfico 1: Nascimentos vs Registros por Município
-    if all(col in df.columns for col in ['municipio', 'nascimentos', 'registros']):
-        fig1 = go.Figure()
-        
-        municipios_agrupados = df.groupby('municipio').agg({
-            'nascimentos': 'sum',
-            'registros': 'sum'
-        }).reset_index()
-        
-        fig1.add_trace(go.Bar(
-            name='Nascimentos',
-            x=municipios_agrupados['municipio'],
-            y=municipios_agrupados['nascimentos'],
-            marker_color='lightblue'
-        ))
-        
-        fig1.add_trace(go.Bar(
-            name='Registros',
-            x=municipios_agrupados['municipio'],
-            y=municipios_agrupados['registros'],
-            marker_color='darkblue'
-        ))
-        
-        fig1.update_layout(
-            title='Nascimentos vs Registros por Município',
-            xaxis_title='Município',
-            yaxis_title='Quantidade',
-            barmode='group',
-            height=500
-        )
-        
-        st.plotly_chart(fig1, use_container_width=True)
+    col1, col2 = st.columns(2)
     
-    # Gráfico 2: Percentual de Registros
-    if 'percentual' in df.columns and 'municipio' in df.columns:
-        percentual_medio = df.groupby('municipio')['percentual'].mean().reset_index()
-        
-        fig2 = px.bar(
-            percentual_medio,
-            x='municipio',
-            y='percentual',
-            title='Percentual Médio de Registros por Município',
-            color='percentual',
-            color_continuous_scale='RdYlGn'
-        )
-        
-        fig2.update_layout(height=500)
-        st.plotly_chart(fig2, use_container_width=True)
+    with col1:
+        # Gráfico 1: Nascimentos vs Registros por Município
+        if all(col in df.columns for col in ['municipio', 'nascimentos', 'registros']):
+            st.subheader("📊 Nascimentos vs Registros por Município")
+            
+            municipios_agrupados = df.groupby('municipio').agg({
+                'nascimentos': 'sum',
+                'registros': 'sum'
+            }).reset_index()
+            
+            # Preparar dados para gráfico de barras
+            chart_data = municipios_agrupados.set_index('municipio')[['nascimentos', 'registros']]
+            st.bar_chart(chart_data)
     
-    # Gráfico 3: Evolução Temporal
+    with col2:
+        # Gráfico 2: Percentual de Registros
+        if 'percentual' in df.columns and 'municipio' in df.columns:
+            st.subheader("📈 Percentual Médio por Município")
+            
+            percentual_medio = df.groupby('municipio')['percentual'].mean().reset_index()
+            percentual_chart = percentual_medio.set_index('municipio')['percentual']
+            st.bar_chart(percentual_chart)
+    
+    # Gráfico 3: Evolução Temporal (linha inteira)
     if all(col in df.columns for col in ['ano', 'mes', 'registros']):
+        st.subheader("📈 Evolução Temporal dos Registros")
+        
         df_temporal = df.groupby(['ano', 'mes'])['registros'].sum().reset_index()
-        df_temporal['data'] = pd.to_datetime(df_temporal[['ano', 'mes']].assign(day=1))
+        df_temporal['periodo'] = df_temporal['ano'].astype(str) + '-' + df_temporal['mes'].astype(str).str.zfill(2)
         
-        fig3 = px.line(
-            df_temporal,
-            x='data',
-            y='registros',
-            title='Evolução Temporal dos Registros',
-            markers=True
-        )
-        
-        fig3.update_layout(height=400)
-        st.plotly_chart(fig3, use_container_width=True)
+        chart_temporal = df_temporal.set_index('periodo')['registros']
+        st.line_chart(chart_temporal)
 
-# Coordenadas dos municípios do Maranhão (amostra)
-COORDENADAS_MUNICIPIOS = {
-    'São Luís': [-2.5307, -44.2706],
-    'Imperatriz': [-5.5294, -47.4916],
-    'Timon': [-5.0951, -42.8369],
-    'Caxias': [-4.8587, -43.3563],
-    'Codó': [-4.4553, -43.8856],
-    'Açailândia': [-4.9472, -47.5078],
-    'Bacabal': [-4.2251, -43.4261],
-    'Balsas': [-7.5324, -46.0351],
-    'Santa Inês': [-3.6679, -45.3788],
-    'Pinheiro': [-2.5218, -45.0836]
-}
-
-def criar_mapa(df: pd.DataFrame):
-    """Cria mapa interativo com dados dos municípios"""
-    
-    # Criar mapa centrado no Maranhão
-    mapa = folium.Map(
-        location=[-4.9609, -45.2744],  # Centro do Maranhão
-        zoom_start=7,
-        tiles='OpenStreetMap'
-    )
+def criar_resumo_geografico(df: pd.DataFrame):
+    """Cria resumo geográfico sem mapa complexo"""
     
     if 'municipio' in df.columns:
+        st.subheader("🗺️ Distribuição Geográfica - Maranhão")
+        
         # Agrupar dados por município
         dados_municipios = df.groupby('municipio').agg({
             'nascimentos': 'sum',
             'registros': 'sum',
             'percentual': 'mean'
-        }).reset_index()
+        }).round(2).reset_index()
         
-        # Adicionar marcadores no mapa
-        for _, row in dados_municipios.iterrows():
-            municipio = row['municipio']
-            
-            if municipio in COORDENADAS_MUNICIPIOS:
-                lat, lon = COORDENADAS_MUNICIPIOS[municipio]
-                
-                # Criar popup com informações
-                popup_text = f"""
-                <b>{municipio}</b><br>
-                Nascimentos: {int(row['nascimentos'])}<br>
-                Registros: {int(row['registros'])}<br>
-                Percentual: {row['percentual']:.1f}%
-                """
-                
-                # Cor do marcador baseada no percentual
-                cor = 'green' if row['percentual'] >= 90 else 'orange' if row['percentual'] >= 70 else 'red'
-                
-                folium.Marker(
-                    location=[lat, lon],
-                    popup=folium.Popup(popup_text, max_width=200),
-                    tooltip=municipio,
-                    icon=folium.Icon(color=cor, icon='info-sign')
-                ).add_to(mapa)
+        # Adicionar classificação de performance
+        dados_municipios['status'] = dados_municipios['percentual'].apply(
+            lambda x: '🟢 Excelente' if x >= 90 
+                     else '🟡 Bom' if x >= 70 
+                     else '🔴 Atenção'
+        )
+        
+        # Ordenar por percentual decrescente
+        dados_municipios = dados_municipios.sort_values('percentual', ascending=False)
+        
+        # Exibir tabela com cores
+        st.dataframe(
+            dados_municipios,
+            use_container_width=True,
+            height=400
+        )
+        
+        # Estatísticas por status
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            excelentes = len(dados_municipios[dados_municipios['percentual'] >= 90])
+            st.metric("🟢 Municípios Excelentes (≥90%)", excelentes)
+        
+        with col2:
+            bons = len(dados_municipios[(dados_municipios['percentual'] >= 70) & (dados_municipios['percentual'] < 90)])
+            st.metric("🟡 Municípios Bons (70-89%)", bons)
+        
+        with col3:
+            atencao = len(dados_municipios[dados_municipios['percentual'] < 70])
+            st.metric("🔴 Municípios em Atenção (<70%)", atencao)
+        
+        return dados_municipios
     
-    return mapa
+    return pd.DataFrame()
+
+def gerar_relatorio_completo(df: pd.DataFrame):
+    """Gera relatório completo em texto"""
+    
+    st.subheader("📋 Relatório Executivo")
+    
+    total_nascimentos = df['nascimentos'].sum() if 'nascimentos' in df.columns else 0
+    total_registros = df['registros'].sum() if 'registros' in df.columns else 0
+    percentual_geral = (total_registros / total_nascimentos * 100) if total_nascimentos > 0 else 0
+    
+    relatorio = f"""
+    **RELATÓRIO DO PROVIMENTO 07/2021 - REGISTROS DE NASCIMENTOS**
+    
+    **Período Analisado:** {df['timestamp'].min().strftime('%d/%m/%Y') if 'timestamp' in df.columns else 'N/A'} a {df['timestamp'].max().strftime('%d/%m/%Y') if 'timestamp' in df.columns else 'N/A'}
+    
+    **DADOS GERAIS:**
+    - Total de Nascimentos: {total_nascimentos:,}
+    - Total de Registros: {total_registros:,}
+    - Percentual Geral de Cobertura: {percentual_geral:.2f}%
+    - Déficit de Registros: {total_nascimentos - total_registros:,}
+    
+    **DISTRIBUIÇÃO:**
+    - Municípios Atendidos: {df['municipio'].nunique() if 'municipio' in df.columns else 0}
+    - Serventias Envolvidas: {df['serventia'].nunique() if 'serventia' in df.columns else 0}
+    - Período de Dados: {df['ano'].nunique() if 'ano' in df.columns else 0} ano(s)
+    
+    **PERFORMANCE:**
+    """
+    
+    if 'percentual' in df.columns and 'municipio' in df.columns:
+        dados_municipios = df.groupby('municipio')['percentual'].mean()
+        excelentes = len(dados_municipios[dados_municipios >= 90])
+        bons = len(dados_municipios[(dados_municipios >= 70) & (dados_municipios < 90)])
+        atencao = len(dados_municipios[dados_municipios < 70])
+        
+        relatorio += f"""
+    - Municípios com Performance Excelente (≥90%): {excelentes}
+    - Municípios com Performance Boa (70-89%): {bons}
+    - Municípios que Necessitam Atenção (<70%): {atencao}
+    
+    **MUNICÍPIOS TOP 5 (Maior Percentual):**
+        """
+        
+        top5 = dados_municipios.nlargest(5)
+        for i, (municipio, perc) in enumerate(top5.items(), 1):
+            relatorio += f"\n    {i}. {municipio}: {perc:.1f}%"
+        
+        relatorio += f"\n\n**MUNICÍPIOS QUE PRECISAM DE ATENÇÃO (Menor Percentual):**"
+        bottom5 = dados_municipios.nsmallest(5)
+        for i, (municipio, perc) in enumerate(bottom5.items(), 1):
+            relatorio += f"\n    {i}. {municipio}: {perc:.1f}%"
+    
+    st.markdown(relatorio)
+    
+    return relatorio
 
 # ==================== INTERFACE PRINCIPAL ====================
 
@@ -262,6 +274,9 @@ def main():
         # ==================== FILTROS ====================
         st.sidebar.subheader("🔍 Filtros")
         
+        # Criar cópia para filtros
+        df_original = df.copy()
+        
         # Filtro por ano
         if 'ano' in df.columns:
             anos_disponiveis = sorted(df['ano'].dropna().unique())
@@ -300,11 +315,15 @@ def main():
             )
             df = df[(df['percentual'] >= min_perc) & (df['percentual'] <= max_perc)]
         
+        # Mostrar info sobre filtros aplicados
+        if len(df) != len(df_original):
+            st.sidebar.info(f"Filtros aplicados: {len(df)} de {len(df_original)} registros")
+        
         # ==================== ABAS PRINCIPAIS ====================
-        tab1, tab2 = st.tabs(["📊 Análise e Gráficos", "🗺️ Mapa Geográfico"])
+        tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🗺️ Análise Geográfica", "📋 Relatório"])
         
         with tab1:
-            st.header("📈 Análise dos Dados")
+            st.header("📈 Dashboard Principal")
             
             # Métricas principais
             col1, col2, col3, col4 = st.columns(4)
@@ -327,8 +346,8 @@ def main():
             
             st.markdown("---")
             
-            # Gráficos
-            criar_graficos(df)
+            # Gráficos nativos do Streamlit
+            criar_graficos_streamlit(df)
             
             st.markdown("---")
             
@@ -362,46 +381,60 @@ def main():
                 )
             else:
                 st.dataframe(df, use_container_width=True, height=400)
+        
+        with tab2:
+            st.header("🗺️ Análise Geográfica")
+            st.markdown("Distribuição e performance por município no Maranhão")
+            
+            dados_geograficos = criar_resumo_geografico(df)
+            
+            if not dados_geograficos.empty:
+                # Gráfico de pizza para distribuição de status
+                st.subheader("📊 Distribuição de Performance")
+                
+                status_counts = dados_geograficos['status'].value_counts()
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Contagem por Status:**")
+                    for status, count in status_counts.items():
+                        st.write(f"{status}: {count} municípios")
+                
+                with col2:
+                    # Gráfico de barras para status
+                    st.bar_chart(status_counts)
+        
+        with tab3:
+            st.header("📋 Relatório Executivo")
+            
+            relatorio_texto = gerar_relatorio_completo(df)
+            
+            # Download do relatório
+            st.download_button(
+                label="💾 Download Relatório (TXT)",
+                data=relatorio_texto,
+                file_name=f"relatorio_provimento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
             
             # Download dos dados filtrados
             csv_dados = df.to_csv(index=False)
             st.download_button(
-                label="💾 Download CSV Filtrado",
+                label="💾 Download Dados CSV",
                 data=csv_dados,
                 file_name=f"dados_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
         
-        with tab2:
-            st.header("🗺️ Visualização Geográfica")
-            st.markdown("Distribuição dos dados por município no estado do Maranhão")
-            
-            # Criar e exibir mapa
-            mapa = criar_mapa(df)
-            st_folium(mapa, width=None, height=500)
-            
-            # Legenda do mapa
-            st.markdown("""
-            **Legenda dos Marcadores:**
-            - 🟢 Verde: Percentual ≥ 90%
-            - 🟠 Laranja: Percentual entre 70% e 90%
-            - 🔴 Vermelho: Percentual < 70%
-            """)
-            
-            # Resumo por município
-            if 'municipio' in df.columns:
-                st.subheader("📊 Resumo por Município")
-                resumo_municipio = df.groupby('municipio').agg({
-                    'nascimentos': 'sum',
-                    'registros': 'sum',
-                    'percentual': 'mean'
-                }).round(2).reset_index()
-                
-                st.dataframe(
-                    resumo_municipio,
-                    use_container_width=True,
-                    height=300
-                )
+        # Rodapé com informações
+        st.markdown("---")
+        st.markdown(f"""
+        <div style='text-align: center; color: gray; font-size: 12px;'>
+        Sistema atualizado em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | 
+        Dados do Provimento 07/2021 | 
+        {len(df)} registros processados
+        </div>
+        """, unsafe_allow_html=True)
     
     else:
         st.info("👆 Selecione uma fonte de dados na barra lateral para começar.")
@@ -416,18 +449,26 @@ def main():
         ### 🔧 Funcionalidades:
         - ✅ Carregamento automático da planilha oficial
         - ✅ Upload de arquivos CSV personalizados
+        - ✅ URLs personalizadas para fontes externas
         - ✅ Filtros dinâmicos por ano, mês, município, serventia e percentual
-        - ✅ Gráficos interativos e analíticos
-        - ✅ Mapa geográfico com distribuição por município
-        - ✅ Download de dados filtrados
-        - ✅ Interface responsiva e intuitiva
+        - ✅ Gráficos nativos do Streamlit (barras, linhas, área)
+        - ✅ Análise geográfica com classificação de performance
+        - ✅ Relatório executivo automático
+        - ✅ Download de dados e relatórios
+        - ✅ Interface responsiva e rápida
+        - ✅ Cache inteligente para melhor performance
         
         ### 📊 Campos Monitorados:
         - Carimbo de data e hora
         - Município e serventia
+        - Posto/unidade interligada
         - Nascimentos e registros
-        - Percentuais de cobertura
+        - Percentuais de cobertura calculados automaticamente
         - Motivos de não atingimento de 100%
+        
+        ### 🎯 Objetivo:
+        Facilitar o monitoramento e a tomada de decisões baseada em dados para 
+        melhorar a cobertura de registros de nascimentos no estado do Maranhão.
         """)
 
 # ==================== EXECUTAR APLICAÇÃO ====================
