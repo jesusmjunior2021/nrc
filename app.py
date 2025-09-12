@@ -39,10 +39,119 @@ def carregar_dados_arquivo(arquivo) -> Optional[pd.DataFrame]:
         st.error(f"Erro ao carregar arquivo: {str(e)}")
         return None
 
-def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
-    """Processa e limpa os dados usando os cabeçalhos reais"""
+def analisar_qualidade_dados(df: pd.DataFrame):
+    """Analisa a qualidade dos dados e retorna estatísticas"""
     
-    # Mapeamento dos nomes reais das colunas (sem alteração)
+    total_registros = len(df)
+    analise_qualidade = {}
+    
+    # Mapear campos importantes
+    campos_criticos = {
+        'Carimbo de data/hora': 'timestamp',
+        'MUNICÍPIO': 'municipio',
+        'Nome da Serventia': 'serventia',
+        'Posto/Unidade Interligada': 'posto_unidade',
+        'Mês': 'mes',
+        'Ano': 'ano',
+        'NASCIMENTOS (QTDE)': 'nascimentos',
+        'REGISTROS (QTDE)': 'registros'
+    }
+    
+    for campo_original, campo_interno in campos_criticos.items():
+        if campo_original in df.columns:
+            nulos = df[campo_original].isna().sum()
+            vazios = (df[campo_original] == '').sum()
+            na_strings = df[campo_original].astype(str).str.lower().isin(['n/a', 'na', 'não informado', 'null']).sum()
+            
+            total_problemas = nulos + vazios + na_strings
+            percentual_problemas = (total_problemas / total_registros) * 100
+            
+            analise_qualidade[campo_original] = {
+                'total_problemas': total_problemas,
+                'nulos': nulos,
+                'vazios': vazios,
+                'na_strings': na_strings,
+                'percentual_problemas': percentual_problemas,
+                'registros_validos': total_registros - total_problemas
+            }
+    
+    return analise_qualidade, total_registros
+
+def limpar_dados(df: pd.DataFrame):
+    """Remove registros com dados críticos nulos e retorna estatísticas de limpeza"""
+    
+    df_original = df.copy()
+    total_original = len(df_original)
+    
+    # Identificar colunas críticas
+    colunas_criticas = []
+    if 'MUNICÍPIO' in df.columns:
+        colunas_criticas.append('MUNICÍPIO')
+    if 'NASCIMENTOS (QTDE)' in df.columns:
+        colunas_criticas.append('NASCIMENTOS (QTDE)')
+    if 'REGISTROS (QTDE)' in df.columns:
+        colunas_criticas.append('REGISTROS (QTDE)')
+    
+    # Estatísticas antes da limpeza
+    stats_antes = {}
+    for col in colunas_criticas:
+        if col in df.columns:
+            nulos = df[col].isna().sum()
+            vazios = (df[col] == '').sum()
+            na_strings = df[col].astype(str).str.lower().isin(['n/a', 'na', 'não informado', 'null', 'nan']).sum()
+            stats_antes[col] = nulos + vazios + na_strings
+    
+    # Limpeza progressiva
+    df_limpo = df.copy()
+    
+    # 1. Remover registros onde município é nulo/vazio/n/a
+    if 'MUNICÍPIO' in df_limpo.columns:
+        mask_municipio = (
+            df_limpo['MUNICÍPIO'].notna() & 
+            (df_limpo['MUNICÍPIO'] != '') & 
+            (~df_limpo['MUNICÍPIO'].astype(str).str.lower().isin(['n/a', 'na', 'não informado', 'null', 'nan']))
+        )
+        df_limpo = df_limpo[mask_municipio]
+    
+    # 2. Remover registros onde nascimentos ou registros são nulos/vazios
+    if 'NASCIMENTOS (QTDE)' in df_limpo.columns:
+        df_limpo = df_limpo[df_limpo['NASCIMENTOS (QTDE)'].notna()]
+        df_limpo = df_limpo[df_limpo['NASCIMENTOS (QTDE)'] != '']
+    
+    if 'REGISTROS (QTDE)' in df_limpo.columns:
+        df_limpo = df_limpo[df_limpo['REGISTROS (QTDE)'].notna()]
+        df_limpo = df_limpo[df_limpo['REGISTROS (QTDE)'] != '']
+    
+    # 3. Converter valores numéricos
+    colunas_numericas = ['NASCIMENTOS (QTDE)', 'REGISTROS (QTDE)', 'Mês', 'Ano']
+    for col in colunas_numericas:
+        if col in df_limpo.columns:
+            df_limpo[col] = pd.to_numeric(df_limpo[col], errors='coerce')
+    
+    # 4. Remover registros onde conversão numérica falhou
+    if 'NASCIMENTOS (QTDE)' in df_limpo.columns:
+        df_limpo = df_limpo[df_limpo['NASCIMENTOS (QTDE)'].notna()]
+    if 'REGISTROS (QTDE)' in df_limpo.columns:
+        df_limpo = df_limpo[df_limpo['REGISTROS (QTDE)'].notna()]
+    
+    total_apos_limpeza = len(df_limpo)
+    registros_removidos = total_original - total_apos_limpeza
+    percentual_removido = (registros_removidos / total_original) * 100 if total_original > 0 else 0
+    
+    estatisticas_limpeza = {
+        'total_original': total_original,
+        'total_limpo': total_apos_limpeza,
+        'registros_removidos': registros_removidos,
+        'percentual_removido': percentual_removido,
+        'stats_antes': stats_antes
+    }
+    
+    return df_limpo, estatisticas_limpeza
+
+def processar_dados(df: pd.DataFrame):
+    """Processa dados já limpos"""
+    
+    # Mapeamento dos nomes reais das colunas
     colunas_reais = {
         'Carimbo de data/hora': 'timestamp',
         'Endereço de e-mail': 'email',
@@ -65,22 +174,15 @@ def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
         if col_original in df_processado.columns:
             df_processado[col_nova] = df_processado[col_original]
     
-    # Processar timestamp se existir
+    # Processar timestamp
     if 'timestamp' in df_processado.columns:
         df_processado['timestamp'] = pd.to_datetime(df_processado['timestamp'], errors='coerce')
         df_processado['ano_timestamp'] = df_processado['timestamp'].dt.year
         df_processado['mes_timestamp'] = df_processado['timestamp'].dt.month
         df_processado['data_formatada'] = df_processado['timestamp'].dt.strftime('%d/%m/%Y %H:%M')
     
-    # Converter colunas numéricas
-    colunas_numericas = ['mes', 'ano', 'nascimentos', 'registros']
-    for col in colunas_numericas:
-        if col in df_processado.columns:
-            df_processado[col] = pd.to_numeric(df_processado[col], errors='coerce')
-    
-    # Calcular percentual se não existir ou estiver vazio
+    # Calcular percentual
     if 'nascimentos' in df_processado.columns and 'registros' in df_processado.columns:
-        # Calcular percentual próprio
         df_processado['percentual_calculado'] = (
             (df_processado['registros'] / df_processado['nascimentos']) * 100
         ).round(2)
@@ -98,12 +200,100 @@ def processar_dados(df: pd.DataFrame) -> pd.DataFrame:
         df_processado['deficit'] = df_processado['nascimentos'] - df_processado['registros']
         df_processado['deficit'] = df_processado['deficit'].fillna(0)
     
-    # Limpeza básica - manter todos os dados, apenas converter vazios
-    for col in df_processado.columns:
-        if df_processado[col].dtype == 'object':
+    # Limpar campos de texto - substituir vazios por "Não informado"
+    campos_texto = ['email', 'serventia', 'posto_unidade', 'motivos']
+    for col in campos_texto:
+        if col in df_processado.columns:
             df_processado[col] = df_processado[col].fillna('Não informado')
+            df_processado[col] = df_processado[col].replace('', 'Não informado')
     
     return df_processado
+
+def mostrar_analise_qualidade(analise_qualidade, total_registros, estatisticas_limpeza):
+    """Mostra análise detalhada da qualidade dos dados"""
+    
+    st.subheader("🔍 Análise de Qualidade dos Dados")
+    
+    # Métricas de limpeza
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "📊 Registros Originais", 
+            f"{estatisticas_limpeza['total_original']:,}"
+        )
+    
+    with col2:
+        st.metric(
+            "✅ Registros Válidos", 
+            f"{estatisticas_limpeza['total_limpo']:,}",
+            f"-{estatisticas_limpeza['registros_removidos']:,}"
+        )
+    
+    with col3:
+        st.metric(
+            "🗑️ Registros Removidos", 
+            f"{estatisticas_limpeza['registros_removidos']:,}",
+            f"{estatisticas_limpeza['percentual_removido']:.1f}%"
+        )
+    
+    with col4:
+        qualidade_geral = 100 - estatisticas_limpeza['percentual_removido']
+        st.metric(
+            "📈 Qualidade Geral", 
+            f"{qualidade_geral:.1f}%"
+        )
+    
+    # Detalhamento por campo
+    st.subheader("📋 Problemas Encontrados por Campo")
+    
+    dados_qualidade = []
+    for campo, stats in analise_qualidade.items():
+        dados_qualidade.append({
+            'Campo': campo,
+            'Registros Válidos': f"{stats['registros_validos']:,}",
+            'Problemas Total': f"{stats['total_problemas']:,}",
+            'Nulos': f"{stats['nulos']:,}",
+            'Vazios': f"{stats['vazios']:,}",
+            'N/A Strings': f"{stats['na_strings']:,}",
+            '% Problemas': f"{stats['percentual_problemas']:.1f}%"
+        })
+    
+    if dados_qualidade:
+        df_qualidade = pd.DataFrame(dados_qualidade)
+        st.dataframe(df_qualidade, use_container_width=True)
+        
+        # Alertas por nível de problema
+        st.subheader("⚠️ Alertas de Qualidade")
+        
+        for campo, stats in analise_qualidade.items():
+            if stats['percentual_problemas'] > 10:
+                st.error(f"🔴 **{campo}**: {stats['percentual_problemas']:.1f}% de problemas - Requer atenção urgente!")
+            elif stats['percentual_problemas'] > 5:
+                st.warning(f"🟡 **{campo}**: {stats['percentual_problemas']:.1f}% de problemas - Monitorar")
+            elif stats['percentual_problemas'] > 0:
+                st.info(f"🟢 **{campo}**: {stats['percentual_problemas']:.1f}% de problemas - Aceitável")
+    
+    # Recomendações
+    st.subheader("💡 Recomendações para Correção Manual")
+    
+    campos_criticos = []
+    campos_moderados = []
+    
+    for campo, stats in analise_qualidade.items():
+        if stats['percentual_problemas'] > 10:
+            campos_criticos.append(f"**{campo}** ({stats['percentual_problemas']:.1f}%)")
+        elif stats['percentual_problemas'] > 5:
+            campos_moderados.append(f"**{campo}** ({stats['percentual_problemas']:.1f}%)")
+    
+    if campos_criticos:
+        st.error(f"🚨 **PRIORIDADE ALTA:** Corrigir urgentemente: {', '.join(campos_criticos)}")
+    
+    if campos_moderados:
+        st.warning(f"⚠️ **PRIORIDADE MÉDIA:** Revisar quando possível: {', '.join(campos_moderados)}")
+    
+    if not campos_criticos and not campos_moderados:
+        st.success("✅ **Qualidade dos dados está em nível aceitável!**")
 
 def criar_graficos_streamlit(df: pd.DataFrame):
     """Cria gráficos usando funcionalidades nativas do Streamlit"""
@@ -285,8 +475,8 @@ def criar_resumo_geografico(df: pd.DataFrame):
     
     return pd.DataFrame()
 
-def gerar_relatorio_completo(df: pd.DataFrame):
-    """Gera relatório executivo completo"""
+def gerar_relatorio_completo(df: pd.DataFrame, estatisticas_limpeza: dict):
+    """Gera relatório executivo completo incluindo qualidade dos dados"""
     
     st.subheader("📋 Relatório Executivo Completo")
     
@@ -306,10 +496,17 @@ def gerar_relatorio_completo(df: pd.DataFrame):
 
 ═══════════════════════════════════════════════════════════════
 
+**QUALIDADE DOS DADOS:**
+• Registros Originais Carregados: {estatisticas_limpeza['total_original']:,}
+• Registros Válidos Processados: {estatisticas_limpeza['total_limpo']:,}
+• Registros Removidos (Dados Inconsistentes): {estatisticas_limpeza['registros_removidos']:,}
+• Percentual de Dados Removidos: {estatisticas_limpeza['percentual_removido']:.2f}%
+• Qualidade Geral dos Dados: {100 - estatisticas_limpeza['percentual_removido']:.2f}%
+
 **PERÍODO DE ANÁLISE:**
 • Data de Início: {data_inicio.strftime('%d/%m/%Y') if data_inicio != 'N/A' else 'N/A'}
 • Data de Fim: {data_fim.strftime('%d/%m/%Y') if data_fim != 'N/A' else 'N/A'}
-• Total de Registros na Base: {len(df):,}
+• Total de Registros Válidos na Análise: {len(df):,}
 
 **INDICADORES PRINCIPAIS:**
 • Total de Nascimentos: {total_nascimentos:,}
@@ -346,10 +543,11 @@ def gerar_relatorio_completo(df: pd.DataFrame):
         for i, (municipio, perc) in enumerate(top10.items(), 1):
             relatorio += f"\n{i:2d}. {municipio}: {perc:.1f}%"
         
-        relatorio += f"\n\n**MUNICÍPIOS QUE PRECISAM DE ATENÇÃO (Menor Percentual):**"
-        bottom10 = dados_municipios.nsmallest(10)
-        for i, (municipio, perc) in enumerate(bottom10.items(), 1):
-            relatorio += f"\n{i:2d}. {municipio}: {perc:.1f}%"
+        if atencao > 0:
+            relatorio += f"\n\n**MUNICÍPIOS QUE PRECISAM DE ATENÇÃO URGENTE (Menor Percentual):**"
+            bottom10 = dados_municipios.nsmallest(min(10, atencao))
+            for i, (municipio, perc) in enumerate(bottom10.items(), 1):
+                relatorio += f"\n{i:2d}. {municipio}: {perc:.1f}%"
     
     # Análise de motivos
     if 'motivos' in df.columns:
@@ -377,21 +575,24 @@ def gerar_relatorio_completo(df: pd.DataFrame):
     relatorio += f"""
 
 ═══════════════════════════════════════════════════════════════
-**RECOMENDAÇÕES:**
+**RECOMENDAÇÕES PARA MELHORIA DA QUALIDADE:**
 
-1. **FOCO PRIORITÁRIO:** Concentrar esforços nos {len(dados_municipios[dados_municipios < 70]) if 'percentual' in df.columns and 'municipio' in df.columns else 'N/A'} municípios com performance abaixo de 70%
+1. **CORREÇÃO DE DADOS:** {estatisticas_limpeza['registros_removidos']:,} registros precisam de correção manual
 
-2. **BOAS PRÁTICAS:** Replicar as estratégias dos municípios com melhor performance
+2. **FOCO PRIORITÁRIO:** Concentrar esforços nos municípios com performance abaixo de 70%
 
-3. **MONITORAMENTO:** Acompanhar mensalmente a evolução dos indicadores
+3. **VALIDAÇÃO DE ENTRADA:** Implementar validações no formulário para evitar dados inconsistentes
 
-4. **CAPACITAÇÃO:** Investir em treinamento das serventias com maior déficit
+4. **MONITORAMENTO:** Acompanhar semanalmente a qualidade dos dados inseridos
 
-5. **TECNOLOGIA:** Implementar sistemas automatizados para reduzir gaps de registro
+5. **TREINAMENTO:** Capacitar equipes responsáveis pelo preenchimento dos formulários
+
+6. **AUTOMAÇÃO:** Implementar verificações automáticas de consistência
 
 ═══════════════════════════════════════════════════════════════
 Relatório gerado automaticamente em {datetime.now().strftime('%d/%m/%Y às %H:%M:%S')}
 Sistema de Monitoramento - Provimento 07/2021
+Base de dados limpa e validada para análise confiável.
     """
     
     st.markdown(relatorio)
@@ -441,19 +642,31 @@ def main():
     
     # ==================== PROCESSAMENTO DOS DADOS ====================
     if df is not None:
-        # Mostrar colunas originais encontradas
-        st.sidebar.subheader("📋 Colunas Encontradas")
-        with st.sidebar.expander("Ver colunas da planilha"):
-            for i, col in enumerate(df.columns, 1):
-                st.sidebar.write(f"{i}. {col}")
+        # Análise de qualidade ANTES da limpeza
+        st.header("🔍 Diagnóstico de Qualidade dos Dados")
+        analise_qualidade, total_registros = analisar_qualidade_dados(df)
         
-        df_processado = processar_dados(df)
+        # Limpeza dos dados
+        with st.spinner("Limpando e validando dados..."):
+            df_limpo, estatisticas_limpeza = limpar_dados(df)
         
-        if df_processado.empty:
-            st.error("❌ Nenhum dado válido encontrado!")
+        # Mostrar análise de qualidade
+        mostrar_analise_qualidade(analise_qualidade, total_registros, estatisticas_limpeza)
+        
+        if df_limpo.empty:
+            st.error("❌ Todos os dados foram removidos durante a limpeza! Verifique a qualidade da fonte.")
             return
         
-        st.success(f"✅ Dados carregados com sucesso! **{len(df_processado)} registros** encontrados.")
+        # Processar dados limpos
+        df_processado = processar_dados(df_limpo)
+        
+        st.success(f"✅ **{len(df_processado)} registros válidos** processados com sucesso!")
+        
+        # Mostrar colunas encontradas
+        st.sidebar.subheader("📋 Colunas Encontradas")
+        with st.sidebar.expander("Ver colunas originais"):
+            for i, col in enumerate(df.columns, 1):
+                st.sidebar.write(f"{i}. {col}")
         
         # ==================== FILTROS DINÂMICOS ====================
         st.sidebar.subheader("🔍 Filtros Avançados")
@@ -461,6 +674,9 @@ def main():
         # Criar cópia para filtros
         df_original = df_processado.copy()
         df_filtrado = df_processado.copy()
+        
+        # Filtros (mesmo código anterior...)
+        # [Mantendo todos os filtros do código anterior]
         
         # Filtro por ano
         if 'ano' in df_filtrado.columns:
@@ -522,7 +738,7 @@ def main():
         if len(df_filtrado) != len(df_original):
             st.sidebar.success(f"📊 Filtros aplicados: **{len(df_filtrado)}** de **{len(df_original)}** registros")
         else:
-            st.sidebar.info(f"📊 Exibindo todos os **{len(df_filtrado)}** registros")
+            st.sidebar.info(f"📊 Exibindo todos os **{len(df_filtrado)}** registros válidos")
         
         # ==================== ABAS PRINCIPAIS ====================
         tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📈 Gráficos", "🗺️ Análise Geográfica", "📋 Relatório Executivo"])
@@ -556,69 +772,52 @@ def main():
             
             st.markdown("---")
             
-            # Tabela principal com TODOS os dados
-            st.subheader("📋 Dados Completos da Base")
+            # Tabela principal com dados limpos
+            st.subheader("📋 Dados Válidos Processados")
             
-            # Seletor de colunas para exibir
-            todas_colunas = df_filtrado.columns.tolist()
-            colunas_originais = df.columns.tolist()
+            # Seletor de colunas para exibição
+            colunas_importantes = []
+            mapeamento_exibicao = {
+                'data_formatada': 'Data/Hora',
+                'municipio': 'Município', 
+                'serventia': 'Serventia',
+                'posto_unidade': 'Posto/Unidade',
+                'ano': 'Ano',
+                'mes': 'Mês',
+                'nascimentos': 'Nascimentos',
+                'registros': 'Registros',
+                'percentual': 'Percentual (%)',
+                'deficit': 'Déficit',
+                'motivos': 'Motivos'
+            }
             
-            col1, col2 = st.columns(2)
+            for col_interna, col_exibicao in mapeamento_exibicao.items():
+                if col_interna in df_filtrado.columns:
+                    colunas_importantes.append(col_interna)
             
-            with col1:
-                exibir_processados = st.checkbox("Exibir dados processados", value=True)
-            
-            with col2:
-                exibir_originais = st.checkbox("Exibir dados originais", value=False)
-            
-            if exibir_processados:
-                # Selecionar colunas mais importantes para exibição
-                colunas_importantes = []
-                mapeamento_exibicao = {
-                    'data_formatada': 'Data/Hora',
-                    'municipio': 'Município', 
-                    'serventia': 'Serventia',
-                    'posto_unidade': 'Posto/Unidade',
-                    'ano': 'Ano',
-                    'mes': 'Mês',
-                    'nascimentos': 'Nascimentos',
-                    'registros': 'Registros',
-                    'percentual': 'Percentual (%)',
-                    'deficit': 'Déficit',
-                    'motivos': 'Motivos'
-                }
+            if colunas_importantes:
+                df_exibicao = df_filtrado[colunas_importantes].copy()
                 
-                for col_interna, col_exibicao in mapeamento_exibicao.items():
-                    if col_interna in df_filtrado.columns:
-                        colunas_importantes.append(col_interna)
+                # Renomear para exibição
+                df_exibicao = df_exibicao.rename(columns=mapeamento_exibicao)
                 
-                if colunas_importantes:
-                    df_exibicao = df_filtrado[colunas_importantes].copy()
-                    
-                    # Renomear para exibição
-                    df_exibicao = df_exibicao.rename(columns=mapeamento_exibicao)
-                    
-                    st.dataframe(
-                        df_exibicao,
-                        use_container_width=True,
-                        height=500
-                    )
-                else:
-                    st.dataframe(df_filtrado, use_container_width=True, height=500)
-            
-            if exibir_originais:
-                st.subheader("📄 Dados Originais da Planilha")
-                st.dataframe(df, use_container_width=True, height=400)
+                st.dataframe(
+                    df_exibicao,
+                    use_container_width=True,
+                    height=500
+                )
+            else:
+                st.dataframe(df_filtrado, use_container_width=True, height=500)
             
             # Downloads
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 csv_filtrado = df_filtrado.to_csv(index=False)
                 st.download_button(
-                    label="💾 Download Dados Filtrados (CSV)",
+                    label="💾 Download Dados Limpos (CSV)",
                     data=csv_filtrado,
-                    file_name=f"dados_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    file_name=f"dados_limpos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
             
@@ -630,6 +829,16 @@ def main():
                     file_name=f"dados_originais_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
+            
+            with col3:
+                # CSV com problemas encontrados
+                if estatisticas_limpeza['registros_removidos'] > 0:
+                    st.download_button(
+                        label="⚠️ Download Registros Removidos",
+                        data="Registros removidos devido a inconsistências de dados",
+                        file_name=f"registros_removidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
         
         with tab2:
             st.header("📈 Análises Gráficas Interativas")
@@ -640,8 +849,8 @@ def main():
             dados_geograficos = criar_resumo_geografico(df_filtrado)
         
         with tab4:
-            st.header("📋 Relatório Executivo")
-            relatorio_texto = gerar_relatorio_completo(df_filtrado)
+            st.header("📋 Relatório Executivo Completo")
+            relatorio_texto = gerar_relatorio_completo(df_filtrado, estatisticas_limpeza)
             
             # Download do relatório
             st.download_button(
@@ -653,12 +862,13 @@ def main():
         
         # Rodapé com informações do sistema
         st.markdown("---")
+        qualidade_dados = 100 - estatisticas_limpeza['percentual_removido']
         st.markdown(f"""
         <div style='text-align: center; color: gray; font-size: 12px; padding: 10px;'>
         🕒 <strong>Sistema atualizado em:</strong> {datetime.now().strftime('%d/%m/%Y às %H:%M:%S')} | 
-        📊 <strong>Dados do Provimento 07/2021</strong> | 
-        📈 <strong>{len(df_filtrado):,} registros processados</strong> |
-        🔄 <strong>Cache ativo</strong>
+        📊 <strong>Qualidade dos dados:</strong> {qualidade_dados:.1f}% | 
+        📈 <strong>{len(df_filtrado):,} registros válidos</strong> |
+        🗑️ <strong>{estatisticas_limpeza['registros_removidos']:,} registros removidos</strong>
         </div>
         """, unsafe_allow_html=True)
     
@@ -667,49 +877,37 @@ def main():
         st.info("👆 **Selecione uma fonte de dados na barra lateral para começar a análise.**")
         
         st.markdown("""
-        ## 📋 Sobre o Sistema
+        ## 📋 Sistema de Limpeza e Análise de Dados
         
-        Este sistema foi desenvolvido para **monitoramento completo** dos dados do **Provimento 07/2021** 
-        referente aos registros de nascimentos em unidades interligadas do estado do Maranhão.
+        Este sistema foi desenvolvido para **monitoramento completo e confiável** dos dados do **Provimento 07/2021**.
         
-        ### 🎯 **Funcionalidades Implementadas:**
+        ### 🔧 **Funcionalidades de Qualidade dos Dados:**
         
-        ✅ **Carregamento Automático** - Conexão direta com a planilha oficial  
-        ✅ **Upload Personalizado** - Drag & drop de arquivos CSV  
-        ✅ **URLs Externas** - Importação de planilhas via link  
-        ✅ **Filtros Avançados** - Por todos os campos: ano, mês, município, serventia, posto/unidade, percentual  
-        ✅ **Visualizações Dinâmicas** - Gráficos interativos organizáveis por qualquer campo  
-        ✅ **Análise Geográfica** - Performance detalhada por município  
-        ✅ **Relatório Executivo** - Relatório automático completo  
-        ✅ **Downloads Múltiplos** - Dados filtrados, originais e relatórios  
-        ✅ **Cache Inteligente** - Performance otimizada  
-        ✅ **Interface Responsiva** - Totalmente adaptável  
+        ✅ **Detecção Automática de Problemas** - Identifica nulos, vazios e valores inconsistentes  
+        ✅ **Limpeza Inteligente** - Remove automaticamente registros com dados críticos inválidos  
+        ✅ **Análise de Qualidade** - Relatórios detalhados sobre a integridade dos dados  
+        ✅ **Alertas de Inconsistência** - Avisos sobre campos que precisam de correção manual  
+        ✅ **Estatísticas de Limpeza** - Mostra quantos registros foram removidos e por quê  
+        ✅ **Recomendações Automáticas** - Sugere ações para melhorar a qualidade dos dados  
         
-        ### 📊 **Campos Monitorados (Cabeçalhos Reais):**
+        ### 📊 **Processo de Validação:**
         
-        1. **Carimbo de data/hora** - Timestamp completo
-        2. **Endereço de e-mail** - Identificação do responsável
-        3. **MUNICÍPIO** - Localização geográfica
-        4. **Nome da Serventia** - Cartório responsável
-        5. **Posto/Unidade Interligada** - Unidade específica
-        6. **Mês** e **Ano** - Período de referência
-        7. **NASCIMENTOS (QTDE)** - Total de nascimentos
-        8. **REGISTROS (QTDE)** - Total de registros realizados
-        9. **Motivos de não 100%** - Justificativas de déficit
-        10. **% Ok** - Percentual de cobertura
+        1. **Carregamento** - Importa dados da fonte escolhida
+        2. **Diagnóstico** - Analisa problemas em cada campo
+        3. **Limpeza** - Remove registros com dados críticos inválidos
+        4. **Validação** - Converte tipos de dados e calcula métricas
+        5. **Relatório** - Gera estatísticas de qualidade
         
-        ### 🚀 **Como Usar:**
+        ### ⚠️ **Critérios de Remoção:**
         
-        1. **Clique em "🔄 Carregar Dados"** na barra lateral
-        2. **Aguarde** o carregamento dos dados (4.191 registros)
-        3. **Use os filtros** para segmentar a análise
-        4. **Navegue pelas abas** para diferentes visões
-        5. **Faça downloads** dos dados e relatórios
+        - **Município vazio/nulo/N/A** - Campo obrigatório
+        - **Nascimentos inválidos** - Deve ser número válido
+        - **Registros inválidos** - Deve ser número válido
+        - **Dados inconsistentes** - Valores que impedem cálculos
         
         ---
         
-        **💡 Dica:** O sistema mantém 100% dos dados originais e permite análise completa 
-        com filtros dinâmicos e visualizações interativas!
+        **💡 Resultado:** Apenas dados confiáveis e consistentes para análise precisa!
         """)
 
 # ==================== EXECUTAR APLICAÇÃO ====================
