@@ -327,9 +327,24 @@ def processar_dados(df: pd.DataFrame):
         df_processado['percentual_calculado'] = df_processado['percentual_calculado'].clip(upper=100)
         
         if 'percentual_original' in df_processado.columns:
+            # A planilha traz o percentual pronto como texto BR (ex.: "62,07%"),
+            # não como número — sem essa conversão a coluna 'percentual' fica
+            # com tipo misto (str + float) e qualquer .min()/.max()/.mean()
+            # quebra com TypeError
+            df_processado['percentual_original'] = (
+                df_processado['percentual_original']
+                .astype(str)
+                .str.replace('%', '', regex=False)
+                .str.replace(',', '.', regex=False)
+                .str.strip()
+            )
+            df_processado['percentual_original'] = pd.to_numeric(
+                df_processado['percentual_original'], errors='coerce'
+            )
             df_processado['percentual'] = df_processado['percentual_original'].fillna(df_processado['percentual_calculado'])
         else:
             df_processado['percentual'] = df_processado['percentual_calculado']
+        df_processado['percentual'] = pd.to_numeric(df_processado['percentual'], errors='coerce').fillna(0)
     
     # Calcular déficit
     if 'nascimentos' in df_processado.columns and 'registros' in df_processado.columns:
