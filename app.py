@@ -67,6 +67,77 @@ def limpar_cache():
     st.session_state.cache_ativo = False
     st.session_state.filtros_aplicados = {}
 
+# ==================== NORMALIZAÇÃO DE SCHEMA DA PLANILHA PÚBLICA ====================
+
+# Na planilha publicada em CSV, a 1a coluna (Carimbo de data/hora) sai sem
+# cabeçalho (o Google Sheets omite o nome quando a coluna é a chave do form).
+# O pandas nomeia essa coluna automaticamente como "Unnamed: 0".
+COLUNA_TIMESTAMP_PADRAO = 'Carimbo de data/hora'
+
+MESES_PT = {
+    'JANEIRO': 1, 'FEVEREIRO': 2, 'MARÇO': 3, 'MARCO': 3, 'ABRIL': 4,
+    'MAIO': 5, 'JUNHO': 6, 'JULHO': 7, 'AGOSTO': 8,
+    'SETEMBRO': 9, 'OUTUBRO': 10, 'NOVEMBRO': 11, 'DEZEMBRO': 12
+}
+
+def converter_mes(valor) -> Optional[int]:
+    """Converte o campo 'Mês' (nome em português OU número) para 1-12.
+
+    A planilha pública traz o mês como texto (ex.: 'JANEIRO'), não como
+    número. Aceita também valores já numéricos para manter compatibilidade
+    com exportações antigas."""
+    if pd.isna(valor):
+        return None
+    texto = str(valor).strip().upper()
+    if texto in MESES_PT:
+        return MESES_PT[texto]
+    try:
+        numero = int(float(texto.replace(',', '.')))
+        if 1 <= numero <= 12:
+            return numero
+    except (ValueError, TypeError):
+        pass
+    return None
+
+def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
+    """Corrige divergências de schema entre o CSV publicado no Google Sheets
+    e os nomes de coluna que o restante do app espera."""
+    df = df.copy()
+
+    # 1) Renomear a 1a coluna (timestamp) quando ela vier sem nome
+    primeira_coluna = df.columns[0]
+    if primeira_coluna != COLUNA_TIMESTAMP_PADRAO and (
+        str(primeira_coluna).strip() == '' or str(primeira_coluna).startswith('Unnamed')
+    ):
+        df = df.rename(columns={primeira_coluna: COLUNA_TIMESTAMP_PADRAO})
+
+    # 2) A coluna de percentual pronto vem como "%" na planilha pública
+    #    (o app internamente procura por "% Ok.")
+    if '%' in df.columns and '% Ok.' not in df.columns:
+        df = df.rename(columns={'%': '% Ok.'})
+
+    # 3) Remover colunas fantasma totalmente vazias (ex.: "Unnamed: 10")
+    for col in list(df.columns):
+        if str(col).startswith('Unnamed') and col != COLUNA_TIMESTAMP_PADRAO and df[col].isna().all():
+            df = df.drop(columns=[col])
+
+    # 4) Remover marcas invisíveis (LRM/RLM) e espaços extras que o Google
+    #    Forms injeta em nomes de município/serventia (ex.: "Açailândia\u200e")
+    #    e que quebram agrupamentos (2 chaves distintas para o mesmo município)
+    campos_texto = ['MUNICÍPIO', 'Nome da Serventia', 'Posto/Unidade Interligada']
+    for col in campos_texto:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace('\u200e', '', regex=False)
+                .str.replace('\u200f', '', regex=False)
+                .str.strip()
+            )
+            df[col] = df[col].replace('nan', pd.NA)
+
+    return df
+
 # ==================== FUNÇÕES DE CARREGAMENTO ====================
 
 @st.cache_data(ttl=300)
@@ -76,6 +147,7 @@ def carregar_dados_url(url: str) -> Optional[pd.DataFrame]:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         df = pd.read_csv(io.StringIO(response.text))
+        df = normalizar_planilha(df)
         return df
     except Exception as e:
         st.error(f"Erro ao carregar dados da URL: {str(e)}")
@@ -86,6 +158,7 @@ def carregar_dados_arquivo(arquivo) -> Optional[pd.DataFrame]:
     """Carrega dados de um arquivo enviado"""
     try:
         df = pd.read_csv(arquivo)
+        df = normalizar_planilha(df)
         return df
     except Exception as e:
         st.error(f"Erro ao carregar arquivo: {str(e)}")
@@ -172,16 +245,24 @@ def limpar_dados(df: pd.DataFrame):
         df_limpo = df_limpo[df_limpo['REGISTROS (QTDE)'] != '']
     
     # Converter valores numéricos
-    colunas_numericas = ['NASCIMENTOS (QTDE)', 'REGISTROS (QTDE)', 'Mês', 'Ano']
+    colunas_numericas = ['NASCIMENTOS (QTDE)', 'REGISTROS (QTDE)', 'Ano']
     for col in colunas_numericas:
         if col in df_limpo.columns:
             df_limpo[col] = pd.to_numeric(df_limpo[col], errors='coerce')
+
+    # "Mês" vem como nome em português (JANEIRO, FEVEREIRO...) na planilha
+    # pública, não como número — usar conversor dedicado em vez de to_numeric
+    if 'Mês' in df_limpo.columns:
+        df_limpo['Mês'] = df_limpo['Mês'].apply(converter_mes)
     
     # Remover onde conversão falhou
     if 'NASCIMENTOS (QTDE)' in df_limpo.columns:
         df_limpo = df_limpo[df_limpo['NASCIMENTOS (QTDE)'].notna()]
     if 'REGISTROS (QTDE)' in df_limpo.columns:
         df_limpo = df_limpo[df_limpo['REGISTROS (QTDE)'].notna()]
+    if 'Mês' in df_limpo.columns:
+        df_limpo = df_limpo[df_limpo['Mês'].notna()]
+        df_limpo['Mês'] = df_limpo['Mês'].astype(int)
     
     total_apos_limpeza = len(df_limpo)
     registros_removidos = total_original - total_apos_limpeza
@@ -222,10 +303,20 @@ def processar_dados(df: pd.DataFrame):
     
     # Processar timestamp
     if 'timestamp' in df_processado.columns:
-        df_processado['timestamp'] = pd.to_datetime(df_processado['timestamp'], errors='coerce')
+        df_processado['timestamp'] = pd.to_datetime(df_processado['timestamp'], errors='coerce', dayfirst=True)
         df_processado['ano_timestamp'] = df_processado['timestamp'].dt.year
         df_processado['mes_timestamp'] = df_processado['timestamp'].dt.month
         df_processado['data_formatada'] = df_processado['timestamp'].dt.strftime('%d/%m/%Y %H:%M')
+
+    # A coluna "Ano" do formulário fica em branco em algumas respostas
+    # (~1% dos registros) — usar o ano do carimbo de data/hora como fallback
+    if 'ano' in df_processado.columns and 'ano_timestamp' in df_processado.columns:
+        df_processado['ano'] = pd.to_numeric(df_processado['ano'], errors='coerce')
+        df_processado['ano'] = df_processado['ano'].fillna(df_processado['ano_timestamp'])
+        df_processado['ano'] = df_processado['ano'].astype('Int64')
+
+    if 'mes' in df_processado.columns:
+        df_processado['mes'] = pd.to_numeric(df_processado['mes'], errors='coerce').astype('Int64')
     
     # Calcular percentual
     if 'nascimentos' in df_processado.columns and 'registros' in df_processado.columns:
@@ -1230,7 +1321,7 @@ def main():
         st.sidebar.info("Carregue dados para ativar")
     
     # URL padrão da planilha
-    url_padrao = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRtKiqlosLL5_CJgGom7BlWpFYExhLTQEjQT_Pdgnv3uEYMlWPpsSeaxfjqy0IxTluVlKSpcZ1IoXQY/pub?gid=152355120&single=true&output=csv"
+    url_padrao = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRtKiqlosLL5_CJgGom7BlWpFYExhLTQEjQT_Pdgnv3uEYMlWPpsSeaxfjqy0IxTluVlKSpcZ1IoXQY/pub?output=csv"
     
     st.sidebar.subheader("📥 Carregamento de Dados")
     fonte_dados = st.sidebar.radio(
