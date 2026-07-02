@@ -8,6 +8,7 @@ from typing import Optional
 import time
 import json
 import calendar
+import unicodedata
 
 # ==================== CONFIGURAÇÃO DA PÁGINA ====================
 st.set_page_config(
@@ -99,10 +100,36 @@ def converter_mes(valor) -> Optional[int]:
         pass
     return None
 
+def _normalizar_texto_cabecalho(s) -> str:
+    """Remove acentos, espaços extras e padroniza caixa pra comparar cabeçalhos
+    com tolerância a pequenas variações de exportação do Google Sheets."""
+    s = str(s).strip().upper()
+    s = unicodedata.normalize('NFKD', s).encode('ASCII', 'ignore').decode('ASCII')
+    s = ' '.join(s.split())
+    return s
+
+# Nome canônico esperado -> variações normalizadas aceitas (sem acento/maiúsculo)
+_VARIACOES_CABECALHOS = {
+    'MUNICÍPIO': ['MUNICIPIO'],
+    'Nome da Serventia': ['NOME DA SERVENTIA', 'SERVENTIA'],
+    'Posto/Unidade Interligada': ['POSTO/UNIDADE INTERLIGADA', 'POSTO UNIDADE INTERLIGADA'],
+    'Mês': ['MES'],
+    'Ano': ['ANO'],
+    'NASCIMENTOS (QTDE)': ['NASCIMENTOS (QTDE)', 'NASCIMENTOS QTDE', 'NASCIMENTOS'],
+    'REGISTROS (QTDE)': ['REGISTROS (QTDE)', 'REGISTROS QTDE', 'REGISTROS'],
+    'Endereço de e-mail': ['ENDERECO DE E-MAIL', 'EMAIL', 'E-MAIL'],
+    'Quais os principais motivos de não terem sido feitos 100% registros?': [
+        'QUAIS OS PRINCIPAIS MOTIVOS DE NAO TEREM SIDO FEITOS 100% REGISTROS?'
+    ],
+    '% Ok.': ['%', '% OK', '% OK.'],
+}
+
 def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
     """Corrige divergências de schema entre o CSV publicado no Google Sheets
-    e os nomes de coluna que o restante do app espera."""
+    e os nomes de coluna que o restante do app espera. Guarda um diagnóstico
+    em df.attrs['diagnostico_colunas'] pra exibir na UI."""
     df = df.copy()
+    diagnostico = {'colunas_originais': list(df.columns), 'renomeadas': {}, 'nao_encontradas': []}
 
     # 1) Renomear a 1a coluna (timestamp) quando ela vier sem nome
     primeira_coluna = df.columns[0]
@@ -110,18 +137,37 @@ def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
         str(primeira_coluna).strip() == '' or str(primeira_coluna).startswith('Unnamed')
     ):
         df = df.rename(columns={primeira_coluna: COLUNA_TIMESTAMP_PADRAO})
+        diagnostico['renomeadas'][str(primeira_coluna)] = COLUNA_TIMESTAMP_PADRAO
 
-    # 2) A coluna de percentual pronto vem como "%" na planilha pública
-    #    (o app internamente procura por "% Ok.")
-    if '%' in df.columns and '% Ok.' not in df.columns:
-        df = df.rename(columns={'%': '% Ok.'})
+    # 2) Matching tolerante: cobre variações de acento/caixa/espaço nos
+    #    cabeçalhos esperados (ex.: "Municipio" sem acento, "MUNICÍPIO " com
+    #    espaço, "% OK" sem ponto). Só renomeia se o nome canônico ainda não
+    #    existir como coluna exata, pra nunca sobrescrever dado real.
+    mapa_normalizado_para_variacoes = {
+        canonico: {_normalizar_texto_cabecalho(v) for v in variacoes} | {_normalizar_texto_cabecalho(canonico)}
+        for canonico, variacoes in _VARIACOES_CABECALHOS.items()
+    }
+    for col_atual in list(df.columns):
+        norm_atual = _normalizar_texto_cabecalho(col_atual)
+        for canonico, variacoes_norm in mapa_normalizado_para_variacoes.items():
+            if canonico in df.columns:
+                continue
+            if norm_atual in variacoes_norm:
+                df = df.rename(columns={col_atual: canonico})
+                diagnostico['renomeadas'][str(col_atual)] = canonico
+                break
 
-    # 3) Remover colunas fantasma totalmente vazias (ex.: "Unnamed: 10")
+    # 3) Registrar quais campos esperados continuam sem correspondência
+    for canonico in _VARIACOES_CABECALHOS:
+        if canonico not in df.columns:
+            diagnostico['nao_encontradas'].append(canonico)
+
+    # 4) Remover colunas fantasma totalmente vazias (ex.: "Unnamed: 10")
     for col in list(df.columns):
         if str(col).startswith('Unnamed') and col != COLUNA_TIMESTAMP_PADRAO and df[col].isna().all():
             df = df.drop(columns=[col])
 
-    # 4) Remover marcas invisíveis (LRM/RLM) e espaços extras que o Google
+    # 5) Remover marcas invisíveis (LRM/RLM) e espaços extras que o Google
     #    Forms injeta em nomes de município/serventia (ex.: "Açailândia\u200e")
     #    e que quebram agrupamentos (2 chaves distintas para o mesmo município)
     campos_texto = ['MUNICÍPIO', 'Nome da Serventia', 'Posto/Unidade Interligada']
@@ -136,6 +182,7 @@ def normalizar_planilha(df: pd.DataFrame) -> pd.DataFrame:
             )
             df[col] = df[col].replace('nan', pd.NA)
 
+    df.attrs['diagnostico_colunas'] = diagnostico
     return df
 
 # ==================== FUNÇÕES DE CARREGAMENTO ====================
@@ -1419,6 +1466,23 @@ def main():
                 df = carregar_dados_arquivo(arquivo)
                 carregar_novos_dados = True
     
+    # ==================== DIAGNÓSTICO DE COLUNAS ====================
+    if df is not None:
+        diag = df.attrs.get('diagnostico_colunas')
+        if diag:
+            with st.sidebar.expander("🔧 Diagnóstico de colunas detectadas", expanded=bool(diag['nao_encontradas'])):
+                if diag['renomeadas']:
+                    st.write("**Renomeadas automaticamente:**")
+                    for original, canonico in diag['renomeadas'].items():
+                        st.caption(f"`{original}` → `{canonico}`")
+                if diag['nao_encontradas']:
+                    st.write("**⚠️ Campos esperados NÃO encontrados na fonte carregada:**")
+                    for campo in diag['nao_encontradas']:
+                        st.caption(f"`{campo}`")
+                    st.caption("Colunas reais recebidas: " + ", ".join(f"`{c}`" for c in diag['colunas_originais']))
+                else:
+                    st.success("Todos os campos esperados foram encontrados.")
+
     # ==================== PROCESSAMENTO DOS DADOS ====================
     
     # Se há dados em cache E não está carregando novos dados, usar cache
@@ -2089,25 +2153,28 @@ QUALIDADE DOS DADOS:
             st.write("**🎯 Principais Achados:**")
             
             # Calcular insights automáticos
-            if 'percentual' in df_processado.columns:
+            if 'percentual' in df_processado.columns and 'municipio' in df_processado.columns and not df_processado.empty:
                 municipios_perf = df_processado.groupby('municipio')['percentual'].mean()
-                melhor_muni = municipios_perf.idxmax()
-                pior_muni = municipios_perf.idxmin()
-                
-                st.write(f"• Melhor performance: **{melhor_muni}** ({municipios_perf.max():.1f}%)")
-                st.write(f"• Necessita atenção: **{pior_muni}** ({municipios_perf.min():.1f}%)")
-                
-                # Tendência
-                if 'ano' in df_processado.columns and df_processado['ano'].nunique() > 1:
-                    tend_anual = df_processado.groupby('ano')['percentual'].mean()
-                    if len(tend_anual) >= 2:
-                        tendencia = "crescente" if tend_anual.iloc[-1] > tend_anual.iloc[0] else "decrescente"
-                        st.write(f"• Tendência geral: **{tendencia}**")
-                
-                # Performance por faixa
-                criticos = len(municipios_perf[municipios_perf < 70])
-                if criticos > 0:
-                    st.write(f"• **{criticos}** municípios precisam atenção urgente")
+                if not municipios_perf.empty:
+                    melhor_muni = municipios_perf.idxmax()
+                    pior_muni = municipios_perf.idxmin()
+                    
+                    st.write(f"• Melhor performance: **{melhor_muni}** ({municipios_perf.max():.1f}%)")
+                    st.write(f"• Necessita atenção: **{pior_muni}** ({municipios_perf.min():.1f}%)")
+                    
+                    # Tendência
+                    if 'ano' in df_processado.columns and df_processado['ano'].nunique() > 1:
+                        tend_anual = df_processado.groupby('ano')['percentual'].mean()
+                        if len(tend_anual) >= 2:
+                            tendencia = "crescente" if tend_anual.iloc[-1] > tend_anual.iloc[0] else "decrescente"
+                            st.write(f"• Tendência geral: **{tendencia}**")
+                    
+                    # Performance por faixa
+                    criticos = len(municipios_perf[municipios_perf < 70])
+                    if criticos > 0:
+                        st.write(f"• **{criticos}** municípios precisam atenção urgente")
+            else:
+                st.info("Sem coluna de município nos dados carregados — não é possível gerar achados por município.")
         
         with col2:
             st.write("**📋 Recomendações Prioritárias:**")
